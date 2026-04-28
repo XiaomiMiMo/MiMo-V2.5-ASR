@@ -128,7 +128,7 @@ from src.mimo_audio.mimo_audio import MimoAudio
 
 model = MimoAudio(
     model_path="./models/MiMo-V2.5-ASR",
-    tokenizer_path="./models/MiMo-Audio-Tokenizer",
+    mimo_audio_tokenizer_path="./models/MiMo-Audio-Tokenizer",
 )
 
 # Automatic language detection (recommended for code-switching)
