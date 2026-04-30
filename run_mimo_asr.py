@@ -86,7 +86,7 @@ class MiMoV25ASRInterface:
             print(error_msg)
             return "", error_msg
 
-    def create_interface(self, default_model_path="", default_tokenizer_path=""):
+    def create_interface(self, default_model_path="", default_tokenizer_path="", init_status_msg=""):
         with gr.Blocks(title="MiMo-V2.5-ASR Speech Recognition", theme=gr.themes.Soft()) as iface:
             gr.Markdown("# MiMo-V2.5-ASR: Robust Speech Recognition")
             gr.Markdown(
@@ -122,6 +122,7 @@ class MiMoV25ASRInterface:
                                 label="Initialization status",
                                 interactive=False,
                                 lines=6,
+                                value=init_status_msg,
                                 placeholder="Click the initialize model button to start...",
                             )
                             gr.Markdown("### System information")
@@ -221,14 +222,17 @@ def main():
     print("Launch MiMo-V2.5-ASR demo...")
     interface = MiMoV25ASRInterface()
 
+    init_status_msg = ""
     if args.model_path or args.tokenizer_path:
         print("Initializing model from command-line paths...")
-        print(interface.initialize_model(args.model_path, args.tokenizer_path))
+        init_status_msg = interface.initialize_model(args.model_path, args.tokenizer_path)
+        print(init_status_msg)
 
     print("Create Gradio interface...")
     iface = interface.create_interface(
         default_model_path=args.model_path or "",
         default_tokenizer_path=args.tokenizer_path or "",
+        init_status_msg=init_status_msg,
     )
 
     print(f"Launch service - {args.host}:{args.port}")
