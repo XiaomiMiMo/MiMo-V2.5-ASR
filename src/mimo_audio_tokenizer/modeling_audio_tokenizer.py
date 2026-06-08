@@ -4,7 +4,6 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from flash_attn import flash_attn_varlen_func
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
@@ -291,22 +290,65 @@ class Attention(nn.Module):
             query_states = apply_rotary_pos_emb(query_states, cos, sin)
             key_states = apply_rotary_pos_emb(key_states, cos, sin)
 
-        cu_len = F.pad(torch.cumsum(seq_len, dim=0), (1, 0), "constant", 0).to(
-            torch.int32
+        # Unpack query, key, value states to 4D tensors: (batch_size_dim, num_heads, max_seqlen, head_dim)
+        batch_size_dim = seq_len.shape[0]
+        max_seqlen = torch.max(seq_len).item()
+
+        q_flat = query_states.reshape(bsz, -1)
+        k_flat = key_states.reshape(bsz, -1)
+        v_flat = value_states.reshape(bsz, -1)
+
+        sequence_mask, unpacking_index = get_sequence_mask(q_flat, seq_len)
+
+        unpacked_q = torch.index_select(q_flat, 0, unpacking_index).view(
+            batch_size_dim, max_seqlen, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+
+        unpacked_k = torch.index_select(k_flat, 0, unpacking_index).view(
+            batch_size_dim, max_seqlen, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+
+        unpacked_v = torch.index_select(v_flat, 0, unpacking_index).view(
+            batch_size_dim, max_seqlen, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+
+        # Construct boolean attention mask: (batch_size_dim, 1, max_seqlen, max_seqlen)
+        padding_mask_q = sequence_mask.unsqueeze(1)  # (batch_size_dim, 1, max_seqlen, 1)
+        padding_mask_k = sequence_mask.transpose(1, 2).unsqueeze(1)  # (batch_size_dim, 1, 1, max_seqlen)
+        attn_mask = padding_mask_q & padding_mask_k
+
+        if self.causal:
+            causal_mask = torch.tril(torch.ones(max_seqlen, max_seqlen, device=query_states.device, dtype=torch.bool))
+            attn_mask = attn_mask & causal_mask
+
+        if self.window_size[0] >= 0 or self.window_size[1] >= 0:
+            grid_i = torch.arange(max_seqlen, device=query_states.device).unsqueeze(1)
+            grid_j = torch.arange(max_seqlen, device=query_states.device).unsqueeze(0)
+            window_mask = torch.ones(max_seqlen, max_seqlen, device=query_states.device, dtype=torch.bool)
+            if self.window_size[0] >= 0:
+                window_mask = window_mask & (grid_j >= grid_i - self.window_size[0])
+            if self.window_size[1] >= 0:
+                window_mask = window_mask & (grid_j <= grid_i + self.window_size[1])
+            attn_mask = attn_mask & window_mask
+
+        # Ensure that every row in the mask has at least one True value (self-attention) to prevent NaN in softmax
+        attn_mask = attn_mask | torch.eye(max_seqlen, device=query_states.device, dtype=torch.bool).unsqueeze(0).unsqueeze(1)
+
+        # Compute scaled dot product attention
+        attn_output = F.scaled_dot_product_attention(
+            unpacked_q,
+            unpacked_k,
+            unpacked_v,
+            attn_mask=attn_mask,
         )
-        max_seqlen = torch.max(seq_len).to(torch.int32).detach()
-        attn_output = flash_attn_varlen_func(
-            query_states,
-            key_states,
-            value_states,
-            cu_len,
-            cu_len,
-            max_seqlen,
-            max_seqlen,
-            causal=self.causal,
-            window_size=self.window_size,
-        )
-        attn_output = attn_output.reshape(bsz, self.embed_dim)
+
+        # Permute and reshape back: (batch_size_dim * max_seqlen, num_heads * head_dim)
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(batch_size_dim * max_seqlen, -1)
+
+        # Pack back using sequence_mask to get (total_tokens, num_heads * head_dim)
+        flat_mask = sequence_mask.view(-1)
+        attn_output = attn_output[flat_mask]
+
         attn_output = self.out_proj(attn_output)
         return attn_output
 

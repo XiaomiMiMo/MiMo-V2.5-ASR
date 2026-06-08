@@ -31,7 +31,14 @@ class MimoAudio:
         mimo_audio_tokenizer_path: str,
         device: str | None = None,
     ) -> None:
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        self.device = device
 
         self.path = model_path
         self.mimo_audio_tokenizer_path = mimo_audio_tokenizer_path

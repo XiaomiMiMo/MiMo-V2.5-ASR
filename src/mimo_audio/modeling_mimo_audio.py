@@ -6,6 +6,7 @@ from typing import List, Optional, Union, cast
 
 import torch
 import torch.distributed as dist
+from contextlib import contextmanager, nullcontext
 from torch import nn
 from transformers import StoppingCriteria
 from transformers.cache_utils import Cache, DynamicCache
@@ -13,6 +14,7 @@ from transformers.generation.streamers import BaseStreamer
 from transformers.generation.utils import (
     GenerateOutput,
     GenerationConfig,
+    GenerationMixin,
     StoppingCriteriaList,
     is_deepspeed_zero3_enabled,
 )
@@ -26,6 +28,13 @@ from transformers.utils import is_torchdynamo_compiling
 
 
 logger = logging.getLogger(__name__)
+
+
+def _compiler_set_stance(stance: str):
+    """Compatibility wrapper for torch.compiler.set_stance (PyTorch 2.7+)."""
+    if hasattr(torch.compiler, "set_stance"):
+        return torch.compiler.set_stance(stance)
+    return nullcontext()
 
 
 class MiMoStopper(StoppingCriteria):
@@ -221,7 +230,9 @@ class MiMoAudioArguments:
         }
 
 
-class MiMoAudioForCausalLM(Qwen2PreTrainedModel):
+class MiMoAudioForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
+    _supports_cache_class = True
+
     def __init__(
         self,
         config: MiMoAudioConfig | Qwen2Config,
@@ -701,7 +712,7 @@ class MiMoAudioForCausalLM(Qwen2PreTrainedModel):
             )
         )
         stance = "default" if warmup_run else "eager_on_recompile"
-        with torch.compiler.set_stance(stance):
+        with _compiler_set_stance(stance):
             return self.slm_sample(
                 input_ids,
                 stopping_criteria=prepared_stopping_criteria,
@@ -746,8 +757,6 @@ class MiMoAudioForCausalLM(Qwen2PreTrainedModel):
             this_peer_finished,
             synced_gpus,
             device=input_ids.device,
-            cur_len=cur_len,
-            max_length=max_length,
         ):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -758,7 +767,7 @@ class MiMoAudioForCausalLM(Qwen2PreTrainedModel):
                 != self.group_size
             ):
                 # prefill run
-                with torch.compiler.set_stance("force_eager"):
+                with _compiler_set_stance("force_eager"):
                     outputs: MiMoAudioOutput = self(**model_inputs)
             else:
                 outputs: MiMoAudioOutput = self(**model_inputs)
